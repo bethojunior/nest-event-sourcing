@@ -10,7 +10,6 @@ export class EventBusService {
 
   async emit(event: string, payload: any) {
     await this.client.connect();
-
     this.client.emit(event, payload);
   }
 }

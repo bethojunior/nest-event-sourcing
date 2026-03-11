@@ -1,13 +1,13 @@
 services:
   redis:
-    image: redis:latest
+    image: redis/redis-stack-server:7.2.0-v10
     container_name: redis
     restart: always
     ports:
       - '6380:6379'
 
   postgres:
-    image: postgres:latest
+    image: postgres:16.2
     container_name: postgres
     restart: always
     ports:
@@ -20,12 +20,15 @@ services:
       - postgres_data:/var/lib/postgresql/data
 
   rabbitmq:
-    image: rabbitmq:3-management
+    image: rabbitmq:3.13-management
     container_name: rabbitmq
     restart: always
     ports:
       - '5672:5672'
       - '15672:15672'
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
 
 volumes:
   postgres_data:
+  rabbitmq_data:
