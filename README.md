@@ -1,6 +1,6 @@
-# NestJS Boilerplate
+# NestJS Event Sourcing Boilerplate
 
-Boilerplate completo para aplicações NestJS com suporte a filas (BullMQ), eventos (Event Emitter), autenticação JWT, Prisma ORM e muito mais.
+Boilerplate completo para aplicações NestJS com arquitetura baseada em eventos (estilo **Event Sourcing**), utilizando **RabbitMQ** como Event Bus, suporte a filas (BullMQ), eventos internos (Event Emitter), autenticação JWT, Prisma ORM e muito mais.
 
 ## 🚀 Tecnologias
 
@@ -10,7 +10,9 @@ Boilerplate completo para aplicações NestJS com suporte a filas (BullMQ), even
 - **[PostgreSQL](https://www.postgresql.org/)** - Banco de dados relacional
 - **[Redis](https://redis.io/)** - Cache e gerenciamento de filas
 - **[BullMQ](https://docs.bullmq.io/)** - Sistema de filas baseado em Redis
-- **[Event Emitter](https://docs.nestjs.com/techniques/events)** - Sistema de eventos assíncronos
+- **[RabbitMQ](https://www.rabbitmq.com/)** - Broker de mensageria para Event Bus
+- **[NestJS Microservices](https://docs.nestjs.com/microservices/basics)** - Integração com RabbitMQ (RMQ Transport)
+- **[Event Emitter](https://docs.nestjs.com/techniques/events)** - Sistema de eventos assíncronos in-process
 - **[JWT](https://jwt.io/)** - Autenticação baseada em tokens
 - **[Passport](http://www.passportjs.org/)** - Middleware de autenticação
 - **[Docker](https://www.docker.com/)** - Containerização
@@ -22,6 +24,7 @@ Boilerplate completo para aplicações NestJS com suporte a filas (BullMQ), even
 - Node.js (v18 ou superior)
 - Yarn ou npm
 - Docker e Docker Compose
+- Instância do RabbitMQ (disponível via Docker)
 - PostgreSQL (ou usar via Docker)
 - Redis (ou usar via Docker)
 
@@ -49,6 +52,9 @@ Edite o arquivo `.env` com suas configurações:
 ```env
 # Application
 APP_PORT=3002
+
+# RabbitMQ Configuration
+RABBITMQ_URL="amqp://guest:guest@localhost:5672"
 
 # Database
 DATABASE_URL="postgresql://root:password@localhost:5432/mydatabase?schema=public"
@@ -134,6 +140,8 @@ npm run start:prod
 
 ```
 src/
+├── common
+│   ├── event-bus/        # Event Bus baseado em RabbitMQ (producers/consumers)
 ├── @shared/              # Código compartilhado
 │   ├── entities/         # Entidades do domínio
 │   ├── events/           # Eventos do sistema
@@ -147,12 +155,103 @@ src/
 │   └── queues/
 │       └── email/        # Fila de emails
 ├── modules/              # Módulos da aplicação
-│   └── auth/            # Módulo de autenticação
+│   └── auth/             # Módulo de autenticação
 ├── providers/            # Provedores de serviços
-│   ├── notification/    # Provedores de notificação
-│   └── prisma/          # Cliente Prisma
+│   ├── notification/     # Provedores de notificação
+│   └── prisma/           # Cliente Prisma
 └── main.ts              # Arquivo principal
 ```
+
+## 🧱 Arquitetura de Event Sourcing & RabbitMQ
+
+A aplicação segue um estilo de arquitetura baseada em eventos:
+
+- **Comandos** chegam aos módulos de aplicação (ex: `UserModule`).
+- O **write model** não grava diretamente o estado final, mas **emite eventos de domínio** para o Event Bus.
+- O **Event Bus** usa **RabbitMQ** para publicar esses eventos em uma fila/rota.
+- **Consumers** (microservices/controllers) reagem a esses eventos e executam os efeitos necessários (envio de email, projeções, side effects, etc).
+
+### Camada de Event Bus (RabbitMQ)
+
+A camada de Event Bus é centralizada em `EventBusModule` e `EventBusService`:
+
+- `EventBusModule` registra um **client RMQ** (`EVENT_BUS`) apontando para o broker RabbitMQ.
+- `EventBusService` expõe um método `emit(event: string, payload: any)` para publicar eventos.
+
+Exemplo simplificado de configuração (já existente no projeto):
+
+```typescript
+// src/common/event-bus/event-bus.module.ts
+@Module({
+  imports: [
+    ClientsModule.register([
+      {
+        name: 'EVENT_BUS',
+        transport: Transport.RMQ,
+        options: {
+          urls: ['amqp://localhost:5672'],
+          queue: 'events',
+          queueOptions: { durable: true },
+        },
+      },
+    ]),
+  ],
+  providers: [EventBusService],
+  exports: [EventBusService],
+})
+export class EventBusModule {}
+```
+
+### Produção de Eventos (Write Model)
+
+O serviço de usuário atua como **producer de eventos**. Em vez de apenas persistir dados, ele constrói um evento de domínio e o envia para o Event Bus:
+
+```typescript
+// src/modules/user/user.service.ts
+@Injectable()
+export class UserService {
+  constructor(private eventBus: EventBusService) {}
+
+  async createUser(props: CreateUserDto) {
+    const user: IUserModelEvent = {
+      id: randomUUID(),
+      name: props.name,
+      phone: props.phone,
+      email: props.email,
+    };
+
+    await this.eventBus.emit('user.created', user);
+
+    return user;
+  }
+}
+```
+
+Nesse fluxo:
+
+- O **evento de domínio** `user.created` é publicado com os dados do usuário.
+- Esse evento é a **fonte de verdade** para os consumidores que vão reagir a ele.
+
+### Consumo de Eventos (Read Models / Side Effects)
+
+Um microservice/controller dedicado consome o evento publicado no RabbitMQ usando `@EventPattern`:
+
+```typescript
+// src/modules/user/events/user-events.controller.ts
+@Controller()
+export class UserEventsController {
+  @EventPattern('user.created')
+  async handleUserCreated(@Payload() props: IUserModelEvent) {
+    console.log('📧 Enviando email para', props.email);
+  }
+}
+```
+
+Esse padrão permite:
+
+- **Desacoplamento** entre quem emite o evento e quem o consome.
+- Adicionar novos consumers (projeções, integrações externas, notificações, etc.) sem impactar o código de escrita.
+- Evoluir para um modelo completo de **Event Sourcing**/CQRS, armazenando eventos em um Event Store e gerando diferentes read models.
 
 ## 🔐 Autenticação
 
@@ -200,7 +299,7 @@ export class MyService {
 
 ## 🎯 Event Emitter
 
-Sistema de eventos assíncronos para comunicação entre módulos:
+Além do Event Bus baseado em RabbitMQ, o projeto também usa `EventEmitterModule` para **eventos in-process**, ideais para comunicação interna leve entre módulos dentro da mesma instância da aplicação.
 
 ### Emitindo eventos
 
